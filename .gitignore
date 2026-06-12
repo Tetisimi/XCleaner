@@ -1,0 +1,9 @@
+# Dependencies
+node_modules/
+
+# Local browser profile (contains private login sessions, cookies, and cache)
+user_data/
+
+# OS files
+.DS_Store
+Thumbs.db
