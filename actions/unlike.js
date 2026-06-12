@@ -4,267 +4,268 @@ import chalk from 'chalk';
 
 // Targeted explicit keywords
 const explicitKeywords = [
-  'nsfw', '18+', 'onlyfans', 'fansly', 'link in bio', 'link in thread', 'porn', 'sex', 
-  'xxx', 'adult', 'erotic', 'nude', 'hentai', 'leaks', 'kink', 'fetish', 'escort', 
-  'hookup', 'sensual', 'boobs', 'butt', 'ass', 'babe', 'sexy', 'playboy', 
-  'camgirl', 'linkinbio', 'linktree', 'findom', 'cashapp', 'tits', 'dick', 'cock', 
-  'pussy', 'vagina', 'chudai', 'chudaai', 'chudayi', 'randi', 'bobs', 'vagene',
-  'fans.ly', 'beacons.ai', 'allmylinks', 'campsite.bio', 'clink', 'of account',
-  'subscribe', 'subscription', 'exclusive content', 'ppv', 'pay per view',
-  'selling', 'content creator', 'model', 'sugar', 'naughty', 'thirsty'
+  'nsfw', '18+', 'onlyfans', 'fansly', 'link in bio', 'porn', 'sex', 'xxx', 'adult',
+  'erotic', 'nude', 'hentai', 'leaks', 'kink', 'fetish', 'escort', 'hookup', 'sensual',
+  'boobs', 'butt', 'ass', 'babe', 'sexy', 'playboy', 'camgirl', 'linkinbio', 'linktree',
+  'findom', 'tits', 'dick', 'cock', 'pussy', 'vagina', 'chudai', 'chudaai', 'randi',
+  'bobs', 'vagene', 'fans.ly', 'beacons.ai', 'allmylinks', 'campsite.bio', 'subscribe',
+  'exclusive content', 'ppv', 'pay per view', 'selling', 'naughty', 'thirsty', 'of account'
 ];
 
-/**
- * Checks if text contains explicit keywords using regex word boundaries.
- * @param {string} rawText
- * @returns {boolean}
- */
 function hasExplicitKeywords(rawText) {
   if (!rawText) return false;
-  
-  // Case-sensitive check for OnlyFans abbreviation
-  if (/\bOF\b/.test(rawText) || /\bO\.F\b/.test(rawText)) {
-    return true;
-  }
-
-  const normalized = rawText.toLowerCase();
-
-  // Dynamic regex for slang variations
-  if (/\bwataa+\b/.test(normalized)) {
-    return true;
-  }
-
-  for (const keyword of explicitKeywords) {
-    if (/^[a-z0-9]+$/i.test(keyword)) {
-      const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-      if (regex.test(normalized)) {
-        return true;
-      }
+  if (/\bOF\b/.test(rawText) || /\bO\.F\b/.test(rawText)) return true;
+  const n = rawText.toLowerCase();
+  if (/\bwataa+\b/.test(n)) return true;
+  for (const kw of explicitKeywords) {
+    if (/^[a-z0-9]+$/i.test(kw)) {
+      if (new RegExp(`\\b${kw}\\b`, 'i').test(n)) return true;
     } else {
-      if (normalized.includes(keyword)) {
-        return true;
-      }
+      if (n.includes(kw)) return true;
     }
   }
   return false;
 }
 
-/**
- * Checks if a tweet has sensitive warning text.
- * @param {string} text
- * @returns {boolean}
- */
 function hasSensitiveOverlayText(text) {
-  const normalized = (text || '').toLowerCase();
-  return (
-    normalized.includes('sensitive content') ||
-    normalized.includes('potentially sensitive') ||
-    normalized.includes('adult content') ||
-    normalized.includes('sensitive media') ||
-    normalized.includes('show media') ||
-    normalized.includes('view media') ||
-    normalized.includes('may contain sensitive material')
-  );
+  const n = (text || '').toLowerCase();
+  return n.includes('sensitive content') || n.includes('potentially sensitive') ||
+    n.includes('adult content') || n.includes('sensitive media') ||
+    n.includes('show media') || n.includes('view media');
 }
 
 /**
- * Inspects a poster's bio by:
- * 1. Hovering over the username to trigger the hover card
- * 2. Falling back to navigating directly to their profile page if card doesn't appear
- * Returns true if the account seems explicit.
+ * FAST hover card bio check.
+ * Hovers over the author link and waits for the hover card using a dynamic waitForSelector.
+ * No fixed sleeps — reacts as soon as the card is ready.
  * @param {import('playwright').Page} page
- * @param {import('playwright').Locator} tweetElement
- * @param {string} likesPageUrl - URL to return to after profile visit
+ * @param {string} authorHref
  * @returns {Promise<boolean>}
  */
-async function isAccountExplicit(page, tweetElement, likesPageUrl) {
+async function checkAuthorBioViaHover(page, authorHref) {
   try {
-    const authorLink = tweetElement.locator('[data-testid="User-Name"] a').first();
-    if (!(await authorLink.isVisible())) return false;
+    // Find author link on the current page using the known href
+    const authorSelector = `a[href="${authorHref}"][role="link"]`;
+    const authorEl = page.locator(authorSelector).first();
+    if (!(await authorEl.isVisible())) return false;
 
-    // Get the profile URL before hovering (so we can fall back to it)
-    const profileHref = await authorLink.getAttribute('href').catch(() => null);
+    // Scroll to author and hover
+    await authorEl.scrollIntoViewIfNeeded().catch(() => {});
+    await authorEl.hover().catch(() => {});
 
-    // ── Step 1: Try hover card ──────────────────────────────────────────
-    await authorLink.hover().catch(() => {});
-    await delay(900); // Full hover delay for X's card trigger
-
-    const hoverCard = page.locator('[data-testid="HoverCard"], [data-testid="userHoverCard"]').first();
-    await hoverCard.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
-
-    if (await hoverCard.isVisible()) {
-      await delay(400); // Let bio text render
-      const bioText = await hoverCard.innerText().catch(() => '');
-      await page.mouse.move(0, 0).catch(() => {}); // Dismiss hover card
-      await delay(200);
-
-      if (bioText) {
-        const explicit = hasExplicitKeywords(bioText) || hasSensitiveOverlayText(bioText);
-        if (explicit) logger.info(chalk.magenta(`  → NSFW bio detected: "${bioText.substring(0, 60).replace(/\n/g, ' ')}"`));
-        return explicit;
-      }
-    }
-
-    // Dismiss hover card if it didn't appear properly
-    await page.mouse.move(0, 0).catch(() => {});
-    await delay(200);
-
-    // ── Step 2: Fallback — Navigate to their profile page ───────────────
-    if (!profileHref) return false;
-
-    const profileUrl = profileHref.startsWith('http')
-      ? profileHref
-      : `https://x.com${profileHref}`;
-
-    logger.info(chalk.dim(`  ↗ Hover card failed. Visiting profile: ${profileUrl}`));
-    await page.goto(profileUrl, { waitUntil: 'domcontentloaded' });
-    await delay(2500);
-
-    // Read bio from their profile page
-    const bioLocator = page.locator('[data-testid="UserDescription"], [data-testid="UserProfileHeader_Items"]').first();
+    // Dynamically wait for hover card — no fixed sleep
     let bioText = '';
-    if (await bioLocator.isVisible()) {
-      bioText = await bioLocator.innerText().catch(() => '');
+    try {
+      await page.waitForSelector(
+        '[data-testid="HoverCard"], [data-testid="userHoverCard"]',
+        { state: 'visible', timeout: 1800 }
+      );
+      const hoverCard = page.locator('[data-testid="HoverCard"], [data-testid="userHoverCard"]').first();
+      await delay(250); // Minimal wait for bio text to fill in
+      bioText = await hoverCard.innerText().catch(() => '');
+    } catch {
+      // Card never appeared — that's okay, just return false
     }
 
-    // Also check their profile header for username/display name keywords
-    const headerText = await page.locator('[data-testid="UserName"]').innerText().catch(() => '');
+    // Move mouse away to dismiss
+    await page.mouse.move(0, 0).catch(() => {});
 
-    // Return to likes page
-    await page.goto(likesPageUrl, { waitUntil: 'domcontentloaded' });
-    await delay(3000);
-
-    const combined = `${bioText} ${headerText}`;
-    const explicit = hasExplicitKeywords(combined) || hasSensitiveOverlayText(combined);
-    if (explicit) logger.info(chalk.magenta(`  → NSFW profile detected: "${combined.substring(0, 80).replace(/\n/g, ' ')}"`));
-    return explicit;
-
-  } catch (err) {
+    if (!bioText) return false;
+    const result = hasExplicitKeywords(bioText) || hasSensitiveOverlayText(bioText);
+    if (result) logger.info(chalk.magenta(`  → NSFW bio: "${bioText.substring(0, 60).replace(/\n/g, ' ')}"`));
+    return result;
+  } catch {
     await page.mouse.move(0, 0).catch(() => {});
     return false;
   }
 }
 
 /**
- * Bulk-unlikes tweets with optional explicit/NSFW filtering.
+ * Batch-extracts all tweet data from the current page in ONE browser round-trip.
+ * Returns an array of tweet info objects.
  * @param {import('playwright').Page} page
- * @param {string} username
- * @param {SafetyTracker} safetyTracker
- * @param {object} options
- * @param {boolean} options.explicitOnly
+ * @returns {Promise<Array>}
+ */
+async function extractTweetsFromPage(page) {
+  return page.evaluate(() => {
+    const results = [];
+    const articles = document.querySelectorAll('article[data-testid="tweet"]');
+
+    for (const article of articles) {
+      // Unique tweet ID from status link
+      let tweetId = null;
+      const statusLink = article.querySelector('a[href*="/status/"]');
+      if (statusLink) {
+        const href = statusLink.getAttribute('href') || '';
+        tweetId = href.split('/status/')[1]?.split('?')[0] || null;
+      }
+
+      // Author href (profile URL)
+      let authorHref = null;
+      const userNameSection = article.querySelector('[data-testid="User-Name"]');
+      if (userNameSection) {
+        const aTag = userNameSection.querySelector('a[href]');
+        if (aTag) authorHref = aTag.getAttribute('href');
+      }
+
+      // Tweet text
+      let tweetText = '';
+      const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
+      if (tweetTextEl) tweetText = tweetTextEl.innerText || '';
+
+      // Has like (unlike) button
+      const hasUnlikeBtn = !!(
+        article.querySelector('[data-testid="unlike"]') ||
+        article.querySelector('button[aria-label*="Unlike"]') ||
+        article.querySelector('button[aria-label*="Liked"]')
+      );
+
+      // Full article text (covers sensitive overlays, etc.)
+      const fullText = article.innerText || '';
+
+      // Has media
+      const hasMedia = !!(
+        article.querySelector('[data-testid="tweetPhoto"]') ||
+        article.querySelector('[data-testid="videoPlayer"]') ||
+        article.querySelector('[data-testid="playButton"]') ||
+        article.querySelector('[data-testid="card.wrapper"]')
+      );
+
+      // Social context (is it a retweet?)
+      const socialCtx = article.querySelector('[data-testid="socialContext"]');
+      const isRetweet = socialCtx ? /reposted/i.test(socialCtx.innerText) : false;
+
+      results.push({ tweetId, authorHref, tweetText, fullText, hasUnlikeBtn, hasMedia, isRetweet });
+    }
+    return results;
+  });
+}
+
+/**
+ * Clicks the unlike button for a specific tweet article.
+ */
+async function clickUnlikeForTweet(page, tweetId) {
+  // Re-locate the specific tweet by its status ID
+  const statusSelector = `a[href*="/status/${tweetId}"]`;
+  const tweetArticle = page.locator(`article[data-testid="tweet"]:has(${statusSelector})`).first();
+
+  const btn = tweetArticle.locator(
+    '[data-testid="unlike"], button[aria-label*="Unlike"], button[aria-label*="Liked"]'
+  ).first();
+
+  if (!(await btn.isVisible())) return false;
+
+  await btn.scrollIntoViewIfNeeded().catch(() => {});
+  await randomDelay(200, 400);
+  await btn.hover().catch(() => {});
+  await randomDelay(250, 500);
+  await btn.click();
+  return true;
+}
+
+/**
+ * Main unlike function.
  */
 export async function unlikeTweets(page, username, safetyTracker, options = { explicitOnly: false }) {
   const modeName = options.explicitOnly ? 'NSFW/Explicit Filter Mode' : 'ALL Likes Mode';
   logger.header(`Starting Unlike Automation (${modeName})`);
-  
+
   const targetUrl = `https://x.com/${username}/likes`;
   logger.info(`Navigating to: ${targetUrl}`);
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-  await delay(4000);
+  await delay(3500);
 
   let unlikedCount = 0;
   let skippedCount = 0;
   let noNewLikesScrolls = 0;
   const maxScrollAttempts = 3;
-  
   const processedTweets = new Set();
-  const checkedAuthors = new Map(); // Cache author decisions to avoid re-inspecting the same account
+  const checkedAuthors = new Map(); // Cache: authorHref -> boolean (isExplicit)
   let isApiBlocked = false;
   let blockCount = 0;
 
-  // Outgoing request tracker
   const requestHandler = (request) => {
     try {
-      const url = request.url();
-      if (url.includes('/graphql/')) {
-        const postData = request.postData() || '';
-        if (postData.includes('UnfavoriteTweet')) {
-          console.log(chalk.dim('  [Network] Sending UnfavoriteTweet request to X servers...'));
+      if (request.url().includes('/graphql/')) {
+        const pd = request.postData() || '';
+        if (pd.includes('UnfavoriteTweet')) {
+          console.log(chalk.dim('  [Network] Sending UnfavoriteTweet...'));
         }
       }
-    } catch (err) {}
+    } catch {}
   };
 
-  // Incoming response tracker
   const responseHandler = async (response) => {
     try {
       const url = response.url();
-      if (url.includes('/graphql/') || url.includes('/UnfavoriteTweet')) {
-        const status = response.status();
-        
-        if (status === 403 || status === 429) {
-          logger.error(`X API block detected: HTTP status ${status}`);
-          isApiBlocked = true;
-          return;
-        }
-
-        const contentType = response.headers()['content-type'] || '';
-        if (status === 200 && contentType.includes('application/json')) {
-          const json = await response.json().catch(() => null);
-          if (json && json.errors && json.errors.length > 0) {
-            const errorMsg = json.errors[0]?.message || 'Unknown error';
-            const errorCode = parseInt(json.errors[0]?.code, 10) || 0;
-
-            if (errorCode === 144 || errorCode === 34 || errorMsg.toLowerCase().includes('not found')) {
-              logger.warn(`Tweet already unliked/deleted (Code ${errorCode}). Skipping.`);
-            } else {
-              logger.warn(`X rejected action: "${errorMsg}" (Code ${errorCode})`);
-              isApiBlocked = true;
-            }
-          } else if (json?.data?.unfavorite_tweet) {
-            console.log(chalk.green('  [Network] Server confirmed unlike successfully.'));
+      if (!url.includes('/graphql/') && !url.includes('UnfavoriteTweet')) return;
+      const status = response.status();
+      if (status === 403 || status === 429) { isApiBlocked = true; return; }
+      const ct = response.headers()['content-type'] || '';
+      if (status === 200 && ct.includes('application/json')) {
+        const json = await response.json().catch(() => null);
+        if (json?.errors?.length > 0) {
+          const code = parseInt(json.errors[0]?.code, 10) || 0;
+          const msg = json.errors[0]?.message || '';
+          if (code === 144 || code === 34 || msg.toLowerCase().includes('not found')) {
+            logger.warn(`Already unliked/deleted (Code ${code}).`);
+          } else {
+            logger.warn(`X rejected: "${msg}" (Code ${code})`);
+            isApiBlocked = true;
           }
+        } else if (json?.data?.unfavorite_tweet) {
+          console.log(chalk.green('  [Network] Server confirmed unlike ✓'));
         }
       }
-    } catch (err) {}
+    } catch {}
   };
-  
+
   page.on('request', requestHandler);
   page.on('response', responseHandler);
 
   try {
     while (true) {
+      // Handle API block
       if (isApiBlocked) {
         blockCount++;
         if (blockCount >= 3) {
-          logger.error('X is persistently blocking requests. Stopping to protect account.');
+          logger.error('Persistent block from X. Stopping to protect account.');
           break;
         }
-        logger.warn('Cooling down for 90 seconds...');
+        logger.warn('Cooling down 90 seconds...');
         isApiBlocked = false;
         await delay(90000);
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-        await delay(5000);
+        await delay(4000);
         continue;
       }
 
-      if (unlikedCount > 0 && unlikedCount % 15 === 0) {
-        logger.info('Periodic reload to verify server state...');
+      // Periodic reload to verify real server state
+      if (unlikedCount > 0 && unlikedCount % 20 === 0) {
+        logger.info('Reloading to verify server sync...');
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-        await delay(5000);
+        await delay(3500);
         if (isApiBlocked) continue;
       }
 
-      const unlikeButtons = await page.locator('[data-testid="unlike"], button[aria-label*="Unlike"], button[aria-label*="Liked"]').all();
+      // ── BATCH EXTRACT all tweet data in ONE call ──────────────────────
+      const tweets = await extractTweetsFromPage(page);
+      const likeable = tweets.filter(t => t.hasUnlikeBtn && !t.isRetweet);
 
-      if (unlikeButtons.length === 0) {
-        logger.info('No liked tweets visible. Scrolling...');
-        
-        const lastHeight = await page.evaluate('document.body.scrollHeight');
+      if (likeable.length === 0) {
+        const lastH = await page.evaluate('document.body.scrollHeight');
         await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
-        await delay(3000);
-        const newHeight = await page.evaluate('document.body.scrollHeight');
-        
-        if (newHeight === lastHeight) {
+        await delay(2500);
+        const newH = await page.evaluate('document.body.scrollHeight');
+        if (newH === lastH) {
           noNewLikesScrolls++;
-          logger.warn(`No height change. Scroll attempt ${noNewLikesScrolls}/${maxScrollAttempts}`);
+          logger.warn(`No height change: attempt ${noNewLikesScrolls}/${maxScrollAttempts}`);
+          if (noNewLikesScrolls >= maxScrollAttempts) {
+            logger.success('No more liked tweets found. Done.');
+            break;
+          }
         } else {
           noNewLikesScrolls = 0;
-        }
-
-        if (noNewLikesScrolls >= maxScrollAttempts) {
-          logger.success('No more liked tweets. Stopping.');
-          break;
         }
         continue;
       }
@@ -272,104 +273,82 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
       noNewLikesScrolls = 0;
       let clickedAnyThisPass = false;
 
-      for (const btn of unlikeButtons) {
+      for (const tweet of likeable) {
+        if (isApiBlocked) break;
+        const { tweetId, authorHref, tweetText, fullText } = tweet;
+
+        // Skip already-processed tweets
+        if (tweetId && processedTweets.has(tweetId)) continue;
+
+        // ── NSFW FILTER LOGIC ────────────────────────────────────────────
+        if (options.explicitOnly) {
+          let isExplicit = false;
+
+          // Fast path 1: Sensitive overlay text
+          if (hasSensitiveOverlayText(fullText)) {
+            isExplicit = true;
+          }
+
+          // Fast path 2: Tweet text has explicit keyword
+          if (!isExplicit && hasExplicitKeywords(tweetText)) {
+            isExplicit = true;
+          }
+
+          // Fast path 3: Author is already cached
+          if (!isExplicit && authorHref && checkedAuthors.has(authorHref)) {
+            isExplicit = checkedAuthors.get(authorHref);
+          }
+
+          // Slow path: hover bio check (only if not cached)
+          if (!isExplicit && authorHref && !checkedAuthors.has(authorHref)) {
+            process.stdout.write(chalk.cyan(`  🔍 Checking @${authorHref.replace('/', '')}... `));
+            isExplicit = await checkAuthorBioViaHover(page, authorHref);
+            checkedAuthors.set(authorHref, isExplicit);
+            process.stdout.write(isExplicit ? chalk.red('NSFW ✗\n') : chalk.dim('Clean ✓\n'));
+          }
+
+          if (!isExplicit) {
+            if (tweetId) processedTweets.add(tweetId);
+            skippedCount++;
+            continue; // Keep liked, move on
+          }
+        }
+
+        // ── CLICK UNLIKE ─────────────────────────────────────────────────
+        const snippet = (tweetText || fullText || '').substring(0, 30).replace(/\s+/g, ' ').trim() || 'media';
         try {
-          if (isApiBlocked) break;
+          const clicked = tweetId
+            ? await clickUnlikeForTweet(page, tweetId)
+            : false;
 
-          const tweetElement = page.locator('article[data-testid="tweet"]').filter({ has: btn }).first();
-          let tweetId = 'unknown';
-          let logSnippet = 'unknown';
-          let authorHref = null;
-
-          if (await tweetElement.isVisible()) {
-            // Get unique tweet ID from the status link
-            const statusLink = tweetElement.locator('a[href*="/status/"]').first();
-            if (await statusLink.isVisible()) {
-              const href = await statusLink.getAttribute('href').catch(() => '');
-              if (href) tweetId = href.split('/status/')[1]?.split('?')[0] || href;
-            }
-            
-            // Get the author's profile href for caching
-            const authorLink = tweetElement.locator('[data-testid="User-Name"] a').first();
-            if (await authorLink.isVisible()) {
-              authorHref = await authorLink.getAttribute('href').catch(() => null);
-            }
-
-            // Try to get display text for logging
-            const textElement = tweetElement.locator('[data-testid="tweetText"]').first();
-            if (await textElement.isVisible()) {
-              const text = await textElement.innerText().catch(() => '');
-              logSnippet = text.substring(0, 30).replace(/\s+/g, ' ').trim();
-            }
-            
-            // Also check tweet body for sensitive overlay text
-            const fullText = await tweetElement.innerText().catch(() => '');
-            if (logSnippet === 'unknown' && fullText) {
-              logSnippet = fullText.substring(0, 30).replace(/\s+/g, ' ').trim();
-            }
+          if (!clicked) {
+            logger.warn(`Could not click unlike for: "${snippet}"`);
+            if (tweetId) processedTweets.add(tweetId); // Avoid retrying stuck tweets
+            continue;
           }
-
-          if (processedTweets.has(tweetId) && tweetId !== 'unknown') continue;
-          if (!(await btn.isVisible()) || !(await btn.isEnabled())) continue;
-
-          // ── NSFW FILTER MODE ───────────────────────────────────────────
-          if (options.explicitOnly) {
-            let isExplicit = false;
-
-            // Quick check: sensitive overlay in the tweet itself
-            const tweetBodyText = await tweetElement.innerText().catch(() => '');
-            if (hasSensitiveOverlayText(tweetBodyText) || hasExplicitKeywords(tweetBodyText)) {
-              isExplicit = true;
-            }
-
-            // Author bio check: use cache to avoid re-inspecting same account
-            if (!isExplicit && authorHref) {
-              if (checkedAuthors.has(authorHref)) {
-                isExplicit = checkedAuthors.get(authorHref);
-              } else {
-                console.log(chalk.cyan(`🔍 Checking account: ${authorHref}`));
-                isExplicit = await isAccountExplicit(page, tweetElement, targetUrl);
-                checkedAuthors.set(authorHref, isExplicit); // Cache the result
-              }
-            }
-
-            if (!isExplicit) {
-              if (tweetId !== 'unknown') processedTweets.add(tweetId);
-              skippedCount++;
-              console.log(chalk.dim(`  ✓ Clean (kept liked): "${logSnippet || 'media/image'}"`));
-              continue;
-            }
-
-            logger.success(`🔞 NSFW tweet found! Unliking: "${logSnippet || 'media/image'}"`);
-          }
-
-          // ── CLICK UNLIKE ──────────────────────────────────────────────
-          await btn.scrollIntoViewIfNeeded().catch(() => {});
-          await randomDelay(200, 400);
-          await btn.hover().catch(() => {});
-          await randomDelay(300, 600);
-          await btn.click();
 
           unlikedCount++;
           clickedAnyThisPass = true;
-          if (tweetId !== 'unknown') processedTweets.add(tweetId);
+          if (tweetId) processedTweets.add(tweetId);
 
-          logger.success(`Clicked Unlike on tweet ${unlikedCount}: "${logSnippet || 'media/image'}"`);
+          logger.success(`Unlike ${unlikedCount}: "${snippet}"`);
           logger.stats(options.explicitOnly ? 'NSFW Unlike' : 'Unlike', unlikedCount);
 
-          await randomDelay(1500, 3000);
+          await randomDelay(1400, 2500);
           await safetyTracker.registerAction(logger);
 
+          // Break and re-extract — DOM shifts after unlike
+          break;
         } catch (err) {
-          logger.warn(`Failed to process tweet: ${err.message || err}`);
-          await randomDelay(1000, 2000);
+          logger.warn(`Failed unlike: ${err.message}`);
+          if (tweetId) processedTweets.add(tweetId);
+          await randomDelay(800, 1500);
         }
       }
 
       if (!clickedAnyThisPass && !isApiBlocked) {
-        logger.info('Scrolling down to load more...');
         await page.evaluate('window.scrollTo(0, window.scrollY + 800)');
-        await delay(2500);
+        await delay(2000);
       }
     }
   } finally {
@@ -377,8 +356,8 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
     page.off('response', responseHandler);
   }
 
-  const resultStats = options.explicitOnly 
-    ? `NSFW Unliked: ${unlikedCount} | Clean (kept): ${skippedCount}`
+  const stats = options.explicitOnly
+    ? `NSFW Unliked: ${unlikedCount} | Clean (kept): ${skippedCount} | Authors cached: ${checkedAuthors.size}`
     : `Total unliked: ${unlikedCount}`;
-  logger.success(`Unlike run completed. ${resultStats}`);
+  logger.success(`Unlike complete. ${stats}`);
 }
