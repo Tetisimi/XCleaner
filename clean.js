@@ -124,9 +124,11 @@ async function main() {
   } catch (error) {
     logger.error('An unexpected error occurred during execution:', error);
   } finally {
-    logger.info('Closing browser in 5 seconds...');
-    await delay(5000);
-    await context.close();
+    if (context) {
+      logger.info('Closing browser in 5 seconds...');
+      await delay(5000);
+      await context.close().catch(() => {});
+    }
     logger.info('Browser closed. Goodbye!');
   }
 }

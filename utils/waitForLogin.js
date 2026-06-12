@@ -36,7 +36,8 @@ async function checkLoginState(page) {
       if (isVisible) {
         const href = await profileLink.getAttribute('href');
         if (href) {
-          const username = href.replace('/', '').trim();
+          // Extract username safely, removing leading slash and ignoring any query strings
+          const username = href.split('?')[0].replace(/^\//, '').trim();
           if (username) {
             return username;
           }
