@@ -8,7 +8,7 @@ import { randomDelay, delay, SafetyTracker } from '../utils/delay.js';
  */
 export async function clearSearchHistory(page, safetyTracker) {
   logger.header('Starting Clear Search History Automation');
-  const targetUrl = 'https://x.com/search';
+  const targetUrl = 'https://x.com/explore';
   logger.info(`Navigating to: ${targetUrl}`);
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
   await delay(4000);
@@ -16,13 +16,16 @@ export async function clearSearchHistory(page, safetyTracker) {
   try {
     // 1. Click search bar to reveal history dropdown
     const searchInput = page.locator('input[data-testid="SearchBox_Search_Input"], input[aria-label="Search query"]').first();
-    if (!(await searchInput.isVisible())) {
-      throw new Error('Search input box not visible.');
+    
+    try {
+      await searchInput.waitFor({ state: 'visible', timeout: 5000 });
+    } catch (e) {
+      throw new Error('Search input box not visible after waiting.');
     }
     
     logger.info('Focusing search box...');
     await searchInput.click();
-    await delay(1500); // Wait for history dropdown to open
+    await delay(2500); // Wait for history dropdown to open
 
     // 2. Find and click "Clear all" button
     const clearAllBtn = page.locator('[data-testid="clear_all"]').first();
@@ -30,6 +33,14 @@ export async function clearSearchHistory(page, safetyTracker) {
     const clearAllTextFallback = page.locator('span:has-text("Clear all"), div:has-text("Clear all")').first();
 
     let clicked = false;
+    
+    // Check if search history is already empty first before trying to find the button
+    const emptyIndicator = page.locator('text="Try searching for", text="No recent searches"').first();
+    if (await emptyIndicator.isVisible()) {
+      logger.success('✓ Search history is already empty!');
+      return;
+    }
+
     if (await clearAllBtn.isVisible()) {
       await clearAllBtn.click();
       clicked = true;
@@ -42,13 +53,8 @@ export async function clearSearchHistory(page, safetyTracker) {
     }
 
     if (!clicked) {
-      // Check if search history is already empty
-      const emptyIndicator = page.locator('text="Try searching for", text="No recent searches"').first();
-      if (await emptyIndicator.isVisible()) {
-        logger.success('✓ Search history is already empty!');
-        return;
-      }
-      throw new Error('Could not locate "Clear all" button. The search history might be empty or the UI changed.');
+      logger.success('✓ No "Clear all" button found. Your search history is already empty!');
+      return;
     }
 
     await delay(1000); // Wait for confirmation sheet
