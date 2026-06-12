@@ -24,15 +24,30 @@ export async function deleteRetweets(page, username, safetyTracker) {
   // Track processed tweet IDs to avoid repeating failed selections and getting stuck in loops
   const processedTweets = new Set();
 
-  // Listen to background API responses to detect failures
+  // Listen to background API responses to detect failures (HTTP-level and GraphQL payload errors)
   const responseHandler = async (response) => {
     try {
       const url = response.url();
-      if (url.includes('/graphql/') || url.includes('/Unrepost') || url.includes('/unrepost')) {
+      if (url.includes('/graphql/') || url.includes('/Unrepost') || url.includes('/unrepost') || url.includes('/UnfavoriteTweet')) {
         const status = response.status();
+        
+        // HTTP level block
         if (status === 403 || status === 429) {
           logger.error(`X API block detected on undoing repost: HTTP status ${status}`);
           isApiBlocked = true;
+          return;
+        }
+
+        // GraphQL level silent block
+        const contentType = response.headers()['content-type'] || '';
+        if (status === 200 && contentType.includes('application/json')) {
+          const json = await response.json().catch(() => null);
+          if (json && json.errors && json.errors.length > 0) {
+            const errorMsg = json.errors[0]?.message || 'Unknown error';
+            const errorCode = json.errors[0]?.code || 'No code';
+            logger.warn(`X Server rejected undo-repost: "${errorMsg}" (Code ${errorCode})`);
+            isApiBlocked = true;
+          }
         }
       }
     } catch (err) {
@@ -141,6 +156,10 @@ export async function deleteRetweets(page, username, safetyTracker) {
           const caretMenu = tweet.locator('[data-testid="caret"], button[aria-label="More"], button[aria-label*="more"]').first();
           if (await caretMenu.isVisible()) {
             await caretMenu.scrollIntoViewIfNeeded().catch(() => {});
+            await randomDelay(200, 400);
+
+            // Hover caret first
+            await caretMenu.hover().catch(() => {});
             await randomDelay(300, 600);
             await caretMenu.click();
 
@@ -148,6 +167,8 @@ export async function deleteRetweets(page, username, safetyTracker) {
             await undoRepostItem.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
 
             if (await undoRepostItem.isVisible()) {
+              await undoRepostItem.hover().catch(() => {});
+              await randomDelay(200, 400);
               await undoRepostItem.click();
               methodSuccess = true;
               undoneCount++;
@@ -169,6 +190,10 @@ export async function deleteRetweets(page, username, safetyTracker) {
             const unretweetButton = tweet.locator('[data-testid="unretweet"], button[aria-label*="Reposted"], button[aria-label*="repost"][aria-label*="active"]').first();
             if (await unretweetButton.isVisible()) {
               await unretweetButton.scrollIntoViewIfNeeded().catch(() => {});
+              await randomDelay(200, 400);
+
+              // Hover green unretweet button
+              await unretweetButton.hover().catch(() => {});
               await randomDelay(300, 600);
               await unretweetButton.click();
 
@@ -182,9 +207,13 @@ export async function deleteRetweets(page, username, safetyTracker) {
 
               let clickedConfirm = false;
               if (await undoRepostConfirm.isVisible()) {
+                await undoRepostConfirm.hover().catch(() => {});
+                await randomDelay(200, 400);
                 await undoRepostConfirm.click();
                 clickedConfirm = true;
               } else if (await undoRepostConfirmFallback.isVisible()) {
+                await undoRepostConfirmFallback.hover().catch(() => {});
+                await randomDelay(200, 400);
                 await undoRepostConfirmFallback.click();
                 clickedConfirm = true;
               }

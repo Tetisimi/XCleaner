@@ -24,15 +24,30 @@ export async function deleteTweets(page, username, safetyTracker) {
   // Track processed tweet IDs to avoid repeating failed selections and getting stuck in loops
   const processedTweets = new Set();
 
-  // Listen to background API responses to detect failures
+  // Listen to background API responses to detect failures (HTTP-level and GraphQL payload errors)
   const responseHandler = async (response) => {
     try {
       const url = response.url();
       if (url.includes('/graphql/') || url.includes('/DestroyTweet')) {
         const status = response.status();
+        
+        // HTTP level block
         if (status === 403 || status === 429) {
           logger.error(`X API block detected on deletion: HTTP status ${status}`);
           isApiBlocked = true;
+          return;
+        }
+
+        // GraphQL level silent block
+        const contentType = response.headers()['content-type'] || '';
+        if (status === 200 && contentType.includes('application/json')) {
+          const json = await response.json().catch(() => null);
+          if (json && json.errors && json.errors.length > 0) {
+            const errorMsg = json.errors[0]?.message || 'Unknown error';
+            const errorCode = json.errors[0]?.code || 'No code';
+            logger.warn(`X Server rejected deletion: "${errorMsg}" (Code ${errorCode})`);
+            isApiBlocked = true;
+          }
         }
       }
     } catch (err) {
@@ -138,9 +153,11 @@ export async function deleteTweets(page, username, safetyTracker) {
           }
 
           await caretMenu.scrollIntoViewIfNeeded().catch(() => {});
-          await randomDelay(300, 600);
+          await randomDelay(200, 400);
 
-          // Click caret menu
+          // Human mouse movement trigger: Hover then wait before click
+          await caretMenu.hover().catch(() => {});
+          await randomDelay(300, 600);
           await caretMenu.click();
           
           // Wait for the delete option to be visible (auto-waits up to 2s)
@@ -153,6 +170,10 @@ export async function deleteTweets(page, username, safetyTracker) {
             if (tweetId !== 'unknown') processedTweets.add(tweetId); // Mark as checked so we don't lock
             continue;
           }
+
+          // Hover dropdown item then click
+          await deleteItem.hover().catch(() => {});
+          await randomDelay(200, 400);
           await deleteItem.click();
 
           // Wait for confirmation buttons
@@ -164,11 +185,20 @@ export async function deleteTweets(page, username, safetyTracker) {
             confirmBtnFallback.waitFor({ state: 'visible', timeout: 2000 })
           ]).catch(() => {});
 
+          let clicked = false;
           if (await confirmBtn.isVisible()) {
+            await confirmBtn.hover().catch(() => {});
+            await randomDelay(200, 400);
             await confirmBtn.click();
+            clicked = true;
           } else if (await confirmBtnFallback.isVisible()) {
+            await confirmBtnFallback.hover().catch(() => {});
+            await randomDelay(200, 400);
             await confirmBtnFallback.click();
-          } else {
+            clicked = true;
+          }
+
+          if (!clicked) {
             logger.warn('Could not find Delete confirmation button. Cancelling menu...');
             await page.keyboard.press('Escape');
             await delay(500);

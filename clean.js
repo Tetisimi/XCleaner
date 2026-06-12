@@ -65,11 +65,12 @@ async function main() {
     name: 'selectedActions',
     message: 'Pick what to clean (Space to select, Enter to confirm):',
     choices: [
-      { title: 'Unlike all liked tweets', value: 'unlike' },
+      { title: 'Unlike ALL liked tweets', value: 'unlike' },
+      { title: 'Unlike ONLY explicit/NSFW liked tweets', value: 'unlike_explicit' },
       { title: 'Delete all my tweets', value: 'delete_tweets' },
       { title: 'Delete all retweets', value: 'delete_retweets' },
       { title: 'Clear search history', value: 'clear_search' },
-      { title: 'Run all of the above', value: 'all' }
+      { title: 'Run all of the above (Unlike ALL)', value: 'all' }
     ],
     min: 1,
     hint: '- Space to select. Enter to submit'
@@ -85,6 +86,11 @@ async function main() {
   let actionsToRun = [...menuResponse.selectedActions];
   if (actionsToRun.includes('all')) {
     actionsToRun = ['unlike', 'delete_tweets', 'delete_retweets', 'clear_search'];
+  }
+
+  // Deduplicate unlike modes if both selected (prefer unlike all)
+  if (actionsToRun.includes('unlike') && actionsToRun.includes('unlike_explicit')) {
+    actionsToRun = actionsToRun.filter(a => a !== 'unlike_explicit');
   }
 
   // 5. Confirm destructive operations
@@ -108,7 +114,9 @@ async function main() {
   try {
     for (const action of actionsToRun) {
       if (action === 'unlike') {
-        await unlikeTweets(page, username, safetyTracker);
+        await unlikeTweets(page, username, safetyTracker, { explicitOnly: false });
+      } else if (action === 'unlike_explicit') {
+        await unlikeTweets(page, username, safetyTracker, { explicitOnly: true });
       } else if (action === 'delete_tweets') {
         await deleteTweets(page, username, safetyTracker);
       } else if (action === 'delete_retweets') {
