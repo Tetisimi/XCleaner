@@ -1,5 +1,5 @@
 import { logger } from '../utils/logger.js';
-import { randomDelay, SafetyTracker, delay } from '../utils/delay.js';
+import { randomDelay, delay } from '../utils/delay.js';
 import chalk from 'chalk';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -13,42 +13,29 @@ const tweetSensitiveCache = new Map();
 const userSensitiveCache = new Map();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DETECTION LAYER 1 — Intercept X's Likes timeline GraphQL response
-//
-// When X loads the liked-tweets page, it fires a GraphQL query whose response
-// contains EVERY tweet's author user data AND the tweet's `possibly_sensitive`
-// flag. This is X's own content moderation verdict — no keyword guessing needed.
+// DETECTION LAYER 1 — Intercept X's Bookmarks timeline GraphQL response
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Recursively walks the GraphQL JSON to extract tweet and user sensitivity.
- * Stores results in the two module-level caches above.
- */
 function extractSensitivityFromGraphQL(obj, depth = 0) {
   if (depth > 25 || !obj || typeof obj !== 'object') return;
 
-  // Tweet result — has rest_id + legacy.full_text
   if (obj.rest_id && obj.legacy && typeof obj.legacy.full_text === 'string') {
     const tweetId = String(obj.rest_id);
-    // `possibly_sensitive` on the tweet = X believes this tweet's media is adult/explicit
     const isSensitive = obj.legacy.possibly_sensitive === true;
     if (!tweetSensitiveCache.has(tweetId)) {
       tweetSensitiveCache.set(tweetId, isSensitive);
     }
 
-    // While we're here — extract the author's user data from core.user_results
     const userResult = obj.core?.user_results?.result;
     if (userResult?.legacy?.screen_name) {
       flagUserFromResult(userResult);
     }
   }
 
-  // Standalone user result (e.g., from UserByScreenName hover card responses)
   if (obj.legacy?.screen_name && !obj.rest_id) {
     flagUserFromResult(obj);
   }
 
-  // Recurse into arrays and objects
   for (const val of Object.values(obj)) {
     if (Array.isArray(val)) {
       for (const item of val) extractSensitivityFromGraphQL(item, depth + 1);
@@ -63,7 +50,7 @@ function flagUserFromResult(userResult) {
   if (!legacy?.screen_name) return;
 
   const authorHref = `/${legacy.screen_name}`.toLowerCase();
-  if (userSensitiveCache.has(authorHref)) return; // Already cached
+  if (userSensitiveCache.has(authorHref)) return;
 
   const isSensitive =
     userResult.profile_interstitial_type === 'sensitive' ||
@@ -77,23 +64,14 @@ function flagUserFromResult(userResult) {
   }
 }
 
-/**
- * Attaches a persistent response interceptor.
- * Catches ALL GraphQL responses: likes timeline, hover card UserByScreenName,
- * and any other X API calls that contain tweet/user data.
- */
 function attachSensitivityInterceptor(page) {
   page.on('response', async (response) => {
     try {
       const url = response.url();
       if (!url.includes('/graphql/')) return;
 
-      // We're interested in: Likes, FavoritedBy, UserByScreenName, and
-      // any timeline query that contains tweet data
       const isRelevant =
-        url.includes('Likes') ||
-        url.includes('Favorites') ||
-        url.includes('FavoritedBy') ||
+        url.includes('Bookmark') ||
         url.includes('UserByScreenName') ||
         url.includes('UserResultByScreenName') ||
         url.includes('Timeline');
@@ -132,15 +110,13 @@ const explicitKeywords = [
   'dm for credits', 'dm for credit', 'dm for collab', 'send me your',
 ];
 
-// Adult platform & vanity domain patterns
 const adultDomainPatterns = [
   /onlyfans\.com/i, /fansly\.com/i, /fans\.ly/i, /manyvids\.com/i,
   /admireme\.vip/i, /loyalfans\.com/i, /fanvue\.com/i, /unfiltrd\.me/i,
   /frisk\.chat/i, /unlockd\.me/i, /4based\.com/i, /ifans\.com/i,
-  /\.vip\b/i,           // .vip TLD — very common for adult creator vanity domains
+  /\.vip\b/i,
 ];
 
-// Sexual emojis in bio context
 const explicitEmojiRe = /🔞|🍆|🍑|💦|🌮|🫦/;
 
 // Matches age-gate patterns like |21+|, (21+), 21+ etc.
@@ -194,7 +170,7 @@ async function checkAuthorBioViaHover(page, authorHref) {
         { state: 'visible', timeout: 2000 }
       );
       const hoverCard = page.locator('[data-testid="HoverCard"], [data-testid="userHoverCard"]').first();
-      await delay(300); // Let all text + links render
+      await delay(300);
       bioText = await hoverCard.innerText().catch(() => '');
     } catch {
       // Card didn't appear — that's OK
@@ -202,8 +178,6 @@ async function checkAuthorBioViaHover(page, authorHref) {
 
     await page.mouse.move(0, 0).catch(() => {});
 
-    // After hovering, the GraphQL interceptor may have fired a UserByScreenName
-    // request and updated userSensitiveCache. Check it first.
     const normalizedHref = authorHref.toLowerCase();
     if (userSensitiveCache.get(normalizedHref) === true) {
       logger.info(chalk.red(`  [Hover→GraphQL] @${authorHref.replace('/', '')} flagged by X's API`));
@@ -212,7 +186,6 @@ async function checkAuthorBioViaHover(page, authorHref) {
 
     if (!bioText) return false;
 
-    // Debug: log what the hover card actually says (first 100 chars)
     const preview = bioText.substring(0, 100).replace(/\n/g, ' ');
     console.log(chalk.dim(`     bio: "${preview}"`));
 
@@ -255,10 +228,13 @@ async function extractTweetsFromPage(page) {
       const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
       if (tweetTextEl) tweetText = tweetTextEl.innerText || '';
 
-      const hasUnlikeBtn = !!(
-        article.querySelector('[data-testid="unlike"]') ||
-        article.querySelector('button[aria-label*="Unlike"]') ||
-        article.querySelector('button[aria-label*="Liked"]')
+      // Bookmark button: X renders it as data-testid="bookmark" when bookmarked
+      // or aria-label containing "Bookmark" / "Remove Bookmark"
+      const hasBookmarkBtn = !!(
+        article.querySelector('[data-testid="removeBookmark"]') ||
+        article.querySelector('[data-testid="bookmark"]') ||
+        article.querySelector('button[aria-label*="Remove from Bookmarks"]') ||
+        article.querySelector('button[aria-label*="Bookmarked"]')
       );
 
       const fullText = article.innerText || '';
@@ -268,29 +244,41 @@ async function extractTweetsFromPage(page) {
         ? `fb:${authorHref}:${fullText.substring(0, 40)}`
         : null;
 
-      results.push({ tweetId, fallbackId, authorHref, authorDisplayName, tweetText, fullText, hasUnlikeBtn, isRetweet });
+      results.push({ tweetId, fallbackId, authorHref, authorDisplayName, tweetText, fullText, hasBookmarkBtn, isRetweet });
     }
     return results;
   });
 }
 
-async function clickUnlikeForTweet(page, tweetId) {
+async function clickRemoveBookmarkForTweet(page, tweetId) {
   const tweetArticle = page.locator(
     `article[data-testid="tweet"]:has(a[href*="/status/${tweetId}"])`
   ).first();
+
+  // On the /i/bookmarks page X renders the filled bookmark as data-testid="bookmark"
+  // (not "removeBookmark" which only appears in other contexts). Include all variants.
   const btn = tweetArticle.locator(
-    '[data-testid="unlike"], button[aria-label*="Unlike"], button[aria-label*="Liked"]'
+    '[data-testid="removeBookmark"], [data-testid="bookmark"], button[aria-label*="Remove from Bookmarks"], button[aria-label*="Bookmarked"]'
   ).first();
-  if (!(await btn.isVisible())) return false;
+
+  if (!(await btn.isVisible())) return 'not_found';
   await btn.scrollIntoViewIfNeeded().catch(() => {});
   await randomDelay(200, 400);
   await btn.hover().catch(() => {});
   await randomDelay(250, 500);
   await btn.click();
-  return true;
+
+  // After a real removal the tweet disappears from the bookmarks list.
+  // Wait up to 3 s for the article to detach from the DOM.
+  try {
+    await tweetArticle.waitFor({ state: 'detached', timeout: 3000 });
+    return 'confirmed'; // Tweet gone from DOM — server accepted it
+  } catch {
+    // Article is still visible — click may not have fired the API call
+    return 'unconfirmed';
+  }
 }
 
-// Safe wrapper for page.evaluate calls that might fail if page is closed
 async function safeEval(page, fn, fallback) {
   try {
     return await page.evaluate(fn);
@@ -303,19 +291,18 @@ async function safeEval(page, fn, fallback) {
 // MAIN FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function unlikeTweets(page, username, safetyTracker, options = { explicitOnly: false }) {
-  const modeName = options.explicitOnly ? 'NSFW/Explicit Filter Mode' : 'ALL Likes Mode';
-  logger.header(`Starting Unlike Automation (${modeName})`);
+export async function unbookmarkNsfwTweets(page, safetyTracker) {
+  logger.header('Starting Bookmark Remover (NSFW/Explicit Filter Mode)');
 
   // Attach the persistent GraphQL interceptor
   attachSensitivityInterceptor(page);
 
-  const targetUrl = `https://x.com/${username}/likes`;
+  const targetUrl = 'https://x.com/i/bookmarks';
   logger.info(`Navigating to: ${targetUrl}`);
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-  await delay(4000); // Give X time to fire the Likes timeline GraphQL
+  await delay(4000); // Give X time to fire the Bookmarks timeline GraphQL
 
-  let unlikedCount = 0;
+  let removedCount = 0;
   let skippedCount = 0;
   let serverConfirmedCount = 0;
   let consecutiveEmptyScrolls = 0;
@@ -328,13 +315,14 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
   let blockCount = 0;
   let pageIsAlive = true;
 
-  // ── UNFAVORITE RESPONSE TRACKER ───────────────────────────────────────────
-  const unFavHandler = async (response) => {
+  // ── BOOKMARK RESPONSE TRACKER ──────────────────────────────────────────────
+  // Only track DELETE mutations — not the timeline load (BookmarkTimeline, etc.)
+  const bookmarkHandler = async (response) => {
     try {
       const url = response.url();
-      if (!url.includes('UnfavoriteTweet') && !url.includes('unfavorite')) return;
+      if (!url.includes('DeleteBookmark') && !url.includes('bookmark_tweet_delete')) return;
       const status = response.status();
-      if (status === 403 || status === 429) { isApiBlocked = true; return; }
+      if (status === 401 || status === 403 || status === 429) { isApiBlocked = true; return; }
       const ct = response.headers()['content-type'] || '';
       if (status === 200 && ct.includes('application/json')) {
         const json = await response.json().catch(() => null);
@@ -342,12 +330,12 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
           const code = parseInt(json.errors[0]?.code, 10) || 0;
           const msg = json.errors[0]?.message || '';
           if (code === 144 || code === 34 || msg.toLowerCase().includes('not found')) {
-            logger.warn(`Server: already unliked (Code ${code}).`);
+            logger.warn(`Server: already removed (Code ${code}).`);
           } else {
             logger.warn(`X rejected: "${msg}" (Code ${code})`);
             isApiBlocked = true;
           }
-        } else if (json?.data?.unfavorite_tweet) {
+        } else if (json?.data?.bookmark_tweet_delete || json?.data?.delete_bookmark) {
           serverConfirmedCount++;
           console.log(chalk.green(`  [Network] Server confirmed ✓ (total: ${serverConfirmedCount})`));
         }
@@ -355,13 +343,13 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
     } catch {}
   };
 
-  page.on('response', unFavHandler);
+  page.on('response', bookmarkHandler);
   page.on('close', () => { pageIsAlive = false; });
   page.on('crash', () => { pageIsAlive = false; });
 
   try {
     while (pageIsAlive) {
-      // ── API BLOCK COOLDOWN ─────────────────────────────────────────────────
+      // ── API BLOCK COOLDOWN ───────────────────────────────────────────────
       if (isApiBlocked) {
         blockCount++;
         if (blockCount >= 3) {
@@ -377,7 +365,7 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
         continue;
       }
 
-      // ── BATCH EXTRACT ──────────────────────────────────────────────────────
+      // ── BATCH EXTRACT ────────────────────────────────────────────────────
       let tweets;
       try {
         tweets = await extractTweetsFromPage(page);
@@ -386,16 +374,16 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
         break;
       }
 
-      const likeable = tweets.filter(t => t.hasUnlikeBtn && !t.isRetweet);
-      const unprocessed = likeable.filter(t => {
+      const bookmarked = tweets.filter(t => t.hasBookmarkBtn && !t.isRetweet);
+      const unprocessed = bookmarked.filter(t => {
         const id = t.tweetId || t.fallbackId;
         return !id || !processedIds.has(id);
       });
 
-      // ── SCROLL WHEN ALL VISIBLE TWEETS DONE ───────────────────────────────
+      // ── SCROLL WHEN ALL VISIBLE TWEETS DONE ─────────────────────────────
       if (unprocessed.length === 0) {
         const lastH = await safeEval(page, 'document.body.scrollHeight', 0);
-        if (lastH === 0) break; // Page closed
+        if (lastH === 0) break;
 
         const viewportH = await safeEval(page, 'window.innerHeight', 800);
         await safeEval(page, `window.scrollBy(0, ${viewportH})`, null);
@@ -406,7 +394,7 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
           consecutiveEmptyScrolls++;
           logger.warn(`End of list? (${consecutiveEmptyScrolls}/${maxEmptyScrolls})`);
           if (consecutiveEmptyScrolls >= maxEmptyScrolls) {
-            logger.success('No more liked tweets. Done.');
+            logger.success('No more bookmarks. Done.');
             break;
           }
         } else {
@@ -429,100 +417,116 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
         // Mark as seen immediately
         if (id) processedIds.add(id);
 
-        // ── NSFW FILTER ──────────────────────────────────────────────────────
-        if (options.explicitOnly) {
-          let isExplicit = false;
-          let reason = '';
+        // ── NSFW FILTER ────────────────────────────────────────────────────
+        let isExplicit = false;
+        let reason = '';
 
-          // ★ LAYER 0: X's own tweet-level sensitivity flag (most reliable)
-          if (tweetId && tweetSensitiveCache.get(tweetId) === true) {
-            isExplicit = true;
-            reason = 'tweet flagged by X';
-          }
-
-          // ★ LAYER 1: X's own user-level sensitivity flag
-          if (!isExplicit && normalizedAuthor && userSensitiveCache.get(normalizedAuthor) === true) {
-            isExplicit = true;
-            reason = 'user flagged by X';
-          }
-
-          // ★ LAYER 2: Sensitive overlay text on the tweet itself
-          if (!isExplicit && hasSensitiveOverlayText(fullText)) {
-            isExplicit = true;
-            reason = 'sensitive overlay detected';
-          }
-
-          // ★ LAYER 4: Author already decided (local cache) — check BEFORE expensive scans
-          if (!isExplicit && normalizedAuthor && checkedAuthors.has(normalizedAuthor)) {
-            isExplicit = checkedAuthors.get(normalizedAuthor);
-            if (isExplicit) reason = 'cached NSFW author';
-          }
-
-          // ★ LAYER 3a: Tweet body keywords / emojis / domains
-          if (!isExplicit && hasExplicitKeywords(tweetText)) {
-            isExplicit = true;
-            reason = 'keyword/emoji in tweet body';
-          }
-
-          // ★ LAYER 3b: Author display name + handle keyword check
-          //    Many NSFW pages carry signals in their name ("🔞 Fan Page", "NSFW Models 18+")
-          //    or handle ("/nsfwxxx", "/onlyfanspage") rather than tweet text.
-          if (!isExplicit) {
-            const { authorDisplayName } = tweet;
-            // Only process if handle is non-empty
-            const handleText = normalizedAuthor ? normalizedAuthor.replace(/^\//,'') : '';
-            if (hasExplicitKeywords(authorDisplayName) || (handleText && hasExplicitKeywords(handleText))) {
-              isExplicit = true;
-              reason = 'keyword in author name/handle';
-            }
-          }
-
-          // ★ LAYER 3c: Full article text scan (catches inline links, quoted tweets,
-          //    follow-context banners that contain NSFW signals)
-          if (!isExplicit && hasExplicitKeywords(fullText)) {
-            isExplicit = true;
-            reason = 'keyword in article text';
-          }
-
-          // ★ LAYER 5: Hover card bio check (last resort — slowest)
-          if (!isExplicit && authorHref && !checkedAuthors.has(normalizedAuthor)) {
-            process.stdout.write(chalk.cyan(`  🔍 @${authorHref.replace('/', '')}... `));
-            isExplicit = await checkAuthorBioViaHover(page, authorHref);
-            // Re-check GraphQL cache — hover may have triggered a new request
-            if (!isExplicit && userSensitiveCache.get(normalizedAuthor) === true) {
-              isExplicit = true;
-              reason = 'X API flagged (post-hover)';
-            }
-            if (isExplicit && !reason) reason = 'bio/hover match';
-            checkedAuthors.set(normalizedAuthor, isExplicit);
-            process.stdout.write(isExplicit ? chalk.red('NSFW ✗\n') : chalk.dim('Clean ✓\n'));
-          }
-
-          if (!isExplicit) {
-            skippedCount++;
-            continue;
-          }
-
-          logger.info(chalk.yellow(`  Reason: ${reason}`));
+        // ★ LAYER 0: X's own tweet-level sensitivity flag (most reliable)
+        if (tweetId && tweetSensitiveCache.get(tweetId) === true) {
+          isExplicit = true;
+          reason = 'tweet flagged by X';
         }
 
-        // ── CLICK UNLIKE ─────────────────────────────────────────────────────
+        // ★ LAYER 1: X's own user-level sensitivity flag
+        if (!isExplicit && normalizedAuthor && userSensitiveCache.get(normalizedAuthor) === true) {
+          isExplicit = true;
+          reason = 'user flagged by X';
+        }
+
+        // ★ LAYER 2: Sensitive overlay text on the tweet itself
+        if (!isExplicit && hasSensitiveOverlayText(fullText)) {
+          isExplicit = true;
+          reason = 'sensitive overlay detected';
+        }
+
+        // ★ LAYER 4: Author already decided (local cache) — check BEFORE expensive scans
+        if (!isExplicit && normalizedAuthor && checkedAuthors.has(normalizedAuthor)) {
+          isExplicit = checkedAuthors.get(normalizedAuthor);
+          if (isExplicit) reason = 'cached NSFW author';
+        }
+
+        // ★ LAYER 3a: Tweet body keywords / emojis / domains
+        if (!isExplicit && hasExplicitKeywords(tweetText)) {
+          isExplicit = true;
+          reason = 'keyword/emoji in tweet body';
+        }
+
+        // ★ LAYER 3b: Author display name + handle keyword check
+        //    Many NSFW pages carry signals in their name ("🔞 Fan Page", "NSFW Models 18+")
+        //    or handle ("/nsfwxxx", "/onlyfanspage") rather than tweet text.
+        if (!isExplicit) {
+          const { authorDisplayName } = tweet;
+          const handleText = normalizedAuthor ? normalizedAuthor.replace(/^\//,'') : '';
+          if (hasExplicitKeywords(authorDisplayName) || (handleText && hasExplicitKeywords(handleText))) {
+            isExplicit = true;
+            reason = 'keyword in author name/handle';
+          }
+        }
+
+        // ★ LAYER 3c: Full article text scan (catches inline links, quoted tweets,
+        //    follow-context banners that contain NSFW signals)
+        if (!isExplicit && hasExplicitKeywords(fullText)) {
+          isExplicit = true;
+          reason = 'keyword in article text';
+        }
+
+        // ★ LAYER 5: Hover card bio check (last resort — slowest)
+        if (!isExplicit && authorHref && !checkedAuthors.has(normalizedAuthor)) {
+          process.stdout.write(chalk.cyan(`  🔍 @${authorHref.replace('/', '')}... `));
+          isExplicit = await checkAuthorBioViaHover(page, authorHref);
+          // Re-check GraphQL cache — hover may have triggered a new request
+          if (!isExplicit && userSensitiveCache.get(normalizedAuthor) === true) {
+            isExplicit = true;
+            reason = 'X API flagged (post-hover)';
+          }
+          if (isExplicit && !reason) reason = 'bio/hover match';
+          checkedAuthors.set(normalizedAuthor, isExplicit);
+          process.stdout.write(isExplicit ? chalk.red('NSFW ✗\n') : chalk.dim('Clean ✓\n'));
+        }
+
+        if (!isExplicit) {
+          skippedCount++;
+          continue;
+        }
+
+        logger.info(chalk.yellow(`  Reason: ${reason}`));
+
+        // ── CLICK REMOVE BOOKMARK ──────────────────────────────────────────
         if (!tweetId) {
           logger.warn(`No status ID — skipping: "${snippet}"`);
           continue;
         }
 
         try {
-          const clicked = await clickUnlikeForTweet(page, tweetId);
-          if (!clicked) {
+          let result = await clickRemoveBookmarkForTweet(page, tweetId);
+
+          if (result === 'not_found') {
             logger.warn(`Button not found: "${snippet}"`);
             continue;
           }
 
-          unlikedCount++;
+          if (result === 'unconfirmed') {
+            // One retry: wait a bit longer then try again (DOM may have lagged)
+            logger.warn(chalk.yellow(`  ↺ Retrying bookmark removal (DOM lag)...`));
+            await delay(1500);
+            result = await clickRemoveBookmarkForTweet(page, tweetId);
+          }
+
+          if (result === 'unconfirmed') {
+            logger.warn(chalk.red(`  ⚠ Still unconfirmed after retry — skipping: "${snippet}"`))
+            continue;
+          }
+
+          if (result === 'not_found') {
+            // Article may have already been removed in the retry attempt
+            logger.warn(`Article gone after retry — counting as removed: "${snippet}"`);
+          }
+
+          // result === 'confirmed' (or 'not_found' after retry = already gone)
+          removedCount++;
           clickedThisPass = true;
-          logger.success(`Unlike ${unlikedCount}: "${snippet}"`);
-          logger.stats(options.explicitOnly ? 'NSFW Unlike' : 'Unlike', unlikedCount);
+          logger.success(`Removed bookmark ${removedCount}: "${snippet}"`);
+          logger.stats('NSFW Unbookmark', removedCount);
 
           await delay(900);
           await randomDelay(600, 1400);
@@ -531,13 +535,13 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
           break; // Re-extract after DOM mutation
         } catch (err) {
           if (!pageIsAlive) break;
-          logger.warn(`Failed unlike: ${err.message}`);
+          logger.warn(`Failed to remove bookmark: ${err.message}`);
           await randomDelay(800, 1500);
         }
       }
 
       if (!clickedThisPass && !isApiBlocked && pageIsAlive) {
-        const stillLeft = likeable.filter(t => {
+        const stillLeft = bookmarked.filter(t => {
           const id = t.tweetId || t.fallbackId;
           return !id || !processedIds.has(id);
         });
@@ -549,11 +553,9 @@ export async function unlikeTweets(page, username, safetyTracker, options = { ex
       }
     }
   } finally {
-    page.off('response', unFavHandler);
+    page.off('response', bookmarkHandler);
   }
 
-  const stats = options.explicitOnly
-    ? `NSFW Unliked: ${unlikedCount} | Server confirmed: ${serverConfirmedCount} | Clean (kept): ${skippedCount} | Authors inspected: ${checkedAuthors.size}`
-    : `Total unliked: ${unlikedCount} | Server confirmed: ${serverConfirmedCount}`;
+  const stats = `NSFW Bookmarks Removed: ${removedCount} | Server confirmed: ${serverConfirmedCount} | Clean (kept): ${skippedCount} | Authors inspected: ${checkedAuthors.size}`;
   logger.success(`Done. ${stats}`);
 }

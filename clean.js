@@ -6,6 +6,7 @@ import { waitForLogin } from './utils/waitForLogin.js';
 
 // Actions
 import { unlikeTweets } from './actions/unlike.js';
+import { unbookmarkNsfwTweets } from './actions/unbookmark.js';
 import { deleteTweets } from './actions/deleteTweets.js';
 import { deleteRetweets } from './actions/deleteRetweets.js';
 import { clearSearchHistory } from './actions/clearSearch.js';
@@ -67,6 +68,7 @@ async function main() {
     choices: [
       { title: 'Unlike ALL liked tweets', value: 'unlike' },
       { title: 'Unlike ONLY explicit/NSFW liked tweets', value: 'unlike_explicit' },
+      { title: 'Remove NSFW bookmarks', value: 'unbookmark_nsfw' },
       { title: 'Delete all my tweets', value: 'delete_tweets' },
       { title: 'Delete all retweets', value: 'delete_retweets' },
       { title: 'Clear search history', value: 'clear_search' },
@@ -117,6 +119,8 @@ async function main() {
         await unlikeTweets(page, username, safetyTracker, { explicitOnly: false });
       } else if (action === 'unlike_explicit') {
         await unlikeTweets(page, username, safetyTracker, { explicitOnly: true });
+      } else if (action === 'unbookmark_nsfw') {
+        await unbookmarkNsfwTweets(page, safetyTracker);
       } else if (action === 'delete_tweets') {
         await deleteTweets(page, username, safetyTracker);
       } else if (action === 'delete_retweets') {
